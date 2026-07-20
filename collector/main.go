@@ -288,7 +288,6 @@ func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
 		"updateRule": nil,
 		"deleteRule": nil,
 		"fields":     fields,
-		"indexes":    []string{"CREATE INDEX idx_system_metrics_created ON system_metrics (created)"},
 	}
 	status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections", pb.token, payload, nil)
 	if err != nil {
