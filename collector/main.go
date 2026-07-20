@@ -138,12 +138,14 @@ func main() {
 
 func loadConfig() (config, error) {
 	hostname, _ := os.Hostname()
+	superuserEmail := strings.TrimSpace(os.Getenv("PB_SUPERUSER_EMAIL"))
+	superuserPassword := os.Getenv("PB_SUPERUSER_PASSWORD")
 	cfg := config{
 		pocketBaseURL:       envOr("POCKETBASE_URL", "http://pocketbase:8090"),
-		superuserEmail:      os.Getenv("PB_SUPERUSER_EMAIL"),
-		superuserPassword:   os.Getenv("PB_SUPERUSER_PASSWORD"),
-		dashboardEmail:      os.Getenv("DASHBOARD_ADMIN_EMAIL"),
-		dashboardPassword:   os.Getenv("DASHBOARD_ADMIN_PASSWORD"),
+		superuserEmail:      superuserEmail,
+		superuserPassword:   superuserPassword,
+		dashboardEmail:      envOr("DASHBOARD_ADMIN_EMAIL", superuserEmail),
+		dashboardPassword:   envOr("DASHBOARD_ADMIN_PASSWORD", superuserPassword),
 		frontendHealthURL:   envOr("FRONTEND_HEALTH_URL", "http://frontend/health"),
 		pocketBaseHealthURL: envOr("POCKETBASE_HEALTH_URL", "http://pocketbase:8090/api/health"),
 		procPath:            envOr("PROC_PATH", "/proc"),
@@ -158,9 +160,6 @@ func loadConfig() (config, error) {
 	}
 	if cfg.dashboardEmail == "" || cfg.dashboardPassword == "" {
 		return config{}, errors.New("DASHBOARD_ADMIN_EMAIL and DASHBOARD_ADMIN_PASSWORD are required")
-	}
-	if len(cfg.dashboardPassword) < 10 {
-		return config{}, errors.New("DASHBOARD_ADMIN_PASSWORD must contain at least 10 characters")
 	}
 	if cfg.interval < time.Second {
 		return config{}, errors.New("COLLECT_INTERVAL must be at least 1s")

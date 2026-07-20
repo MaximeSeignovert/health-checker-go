@@ -21,7 +21,7 @@ docker compose up -d --build
 
 Le dashboard est disponible sur `http://localhost:3000`. PocketBase est lié uniquement à la boucle locale sur `http://127.0.0.1:8090/_/`.
 
-Connectez-vous au dashboard avec `DASHBOARD_ADMIN_EMAIL` et `DASHBOARD_ADMIN_PASSWORD`. Le compte est créé automatiquement au démarrage du collecteur. Une modification de ces variables puis un redémarrage du collecteur met à jour les identifiants du compte.
+Connectez-vous au dashboard avec `DASHBOARD_ADMIN_EMAIL` et `DASHBOARD_ADMIN_PASSWORD`. Le compte est créé automatiquement au démarrage du collecteur. Une modification de ces variables puis un redémarrage du collecteur met à jour les identifiants du compte. Pour préserver les déploiements existants, les identifiants PocketBase sont utilisés temporairement si ces deux variables ne sont pas encore définies.
 
 ```bash
 docker compose ps
@@ -42,14 +42,14 @@ docker compose logs -f collector
 | `HOST_ROOT_PATH` | `/` | Système de fichiers dont l'espace est mesuré |
 | `POCKETBASE_VERSION` | `0.38.2` | Version du binaire PocketBase |
 
-Les variables suivantes n'ont volontairement aucune valeur par défaut et doivent être définies :
+Les variables d'accès suivantes sont disponibles :
 
 | Variable | Rôle |
 | --- | --- |
 | `PB_SUPERUSER_EMAIL` | Compte technique utilisé uniquement par le collecteur |
 | `PB_SUPERUSER_PASSWORD` | Mot de passe long et unique du compte technique |
-| `DASHBOARD_ADMIN_EMAIL` | Identifiant affiché sur l'écran de connexion |
-| `DASHBOARD_ADMIN_PASSWORD` | Mot de passe du dashboard, 10 caractères minimum |
+| `DASHBOARD_ADMIN_EMAIL` | Identifiant du dashboard ; retombe sur `PB_SUPERUSER_EMAIL` s'il est absent |
+| `DASHBOARD_ADMIN_PASSWORD` | Mot de passe du dashboard ; retombe sur `PB_SUPERUSER_PASSWORD` s'il est absent |
 
 À 15 secondes, la collection reçoit 5 760 lignes par jour. Le nettoyage s'exécute chaque heure et supprime progressivement les données dépassant la rétention.
 
