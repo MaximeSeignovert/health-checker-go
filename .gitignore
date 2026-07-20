@@ -23,6 +23,8 @@ collector/collector
 **/pb_data/
 **/pb_migrations/
 **/pb_hooks/
+!pocketbase/pb_hooks/
+!pocketbase/pb_hooks/*.pb.js
 
 # Logs, système et éditeurs
 *.log

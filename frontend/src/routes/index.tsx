@@ -6,10 +6,17 @@ import {
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { LoginScreen } from '@/components/auth/login-screen'
 import { HealthChecksPanel, type HealthCheck } from '@/components/dashboard/health-checks-panel'
 import { MetricCard } from '@/components/dashboard/metric-card'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   ApiError,
   apiFetch,
@@ -21,6 +28,14 @@ import {
 export const Route = createFileRoute('/')({
   component: Index,
 })
+
+type MetricRange = '1h' | '24h' | '7d'
+
+const METRIC_RANGES: Record<MetricRange, { label: string; axisLabel: string; bucketSeconds: number }> = {
+  '1h': { label: '1 heure', axisLabel: '−1 H', bucketSeconds: 30 },
+  '24h': { label: '24 heures', axisLabel: '−24 H', bucketSeconds: 5 * 60 },
+  '7d': { label: '1 semaine', axisLabel: '−7 J', bucketSeconds: 30 * 60 },
+}
 
 function Index() {
   const [session, setSession] = useState<DashboardSession | null | undefined>(undefined)
@@ -56,13 +71,18 @@ interface DashboardProps {
 }
 
 function Dashboard({ session, onLogout }: DashboardProps) {
-  const [metrics, setMetrics] = useState<MetricRecord[]>([])
+  const [latest, setLatest] = useState<MetricRecord | null>(null)
+  const [metricPoints, setMetricPoints] = useState<MetricHistoryPoint[]>([])
+  const [metricRange, setMetricRange] = useState<MetricRange>('1h')
+  const [bucketSeconds, setBucketSeconds] = useState(METRIC_RANGES['1h'].bucketSeconds)
   const [checks, setChecks] = useState<HealthCheck[]>([])
   const [metricsLoading, setMetricsLoading] = useState(true)
+  const [historyLoading, setHistoryLoading] = useState(true)
   const [checksLoading, setChecksLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(0)
+  const metricsRequestId = useRef(0)
 
   const handleRequestError = useCallback((caught: unknown, fallback: string) => {
     if (caught instanceof ApiError && caught.status === 401) {
@@ -72,24 +92,26 @@ function Dashboard({ session, onLogout }: DashboardProps) {
     return caught instanceof Error ? caught.message : fallback
   }, [onLogout])
 
-  const loadMetrics = useCallback(async (signal?: AbortSignal) => {
+  const loadMetrics = useCallback(async (range: MetricRange, signal?: AbortSignal) => {
+    const requestId = ++metricsRequestId.current
     try {
-      const params = new URLSearchParams({
-        page: '1',
-        perPage: '120',
-        sort: '-created',
-        fields:
-          'id,cpu_percent,memory_percent,memory_used_bytes,memory_total_bytes,disk_percent,disk_free_bytes,disk_total_bytes,frontend_healthy,frontend_latency_ms,pocketbase_healthy,pocketbase_latency_ms,hostname,created',
-      })
-      const response = await apiFetch(`/api/collections/system_metrics/records?${params.toString()}`, { signal })
-      const payload = (await response.json()) as MetricsResponse
-      setMetrics(payload.items.reverse())
+      const params = new URLSearchParams({ range })
+      const response = await apiFetch(`/api/vps-watch/metrics?${params.toString()}`, { signal })
+      const payload = (await response.json()) as MetricsHistoryResponse
+      if (requestId !== metricsRequestId.current || signal?.aborted) return
+      if (payload.range !== range) throw new Error('La période retournée ne correspond pas à la période demandée.')
+      setLatest(payload.latest)
+      setMetricPoints(payload.items)
+      setBucketSeconds(payload.bucketSeconds)
       setError(null)
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return
       setError(handleRequestError(caught, 'Connexion aux métriques impossible.'))
     } finally {
-      setMetricsLoading(false)
+      if (requestId === metricsRequestId.current) {
+        setMetricsLoading(false)
+        setHistoryLoading(false)
+      }
     }
   }, [handleRequestError])
 
@@ -114,28 +136,48 @@ function Dashboard({ session, onLogout }: DashboardProps) {
 
   const refreshAll = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true)
-    await Promise.all([loadMetrics(), loadChecks()])
+    await Promise.all([loadMetrics(metricRange), loadChecks()])
     setNow(Date.now())
     setRefreshing(false)
-  }, [loadChecks, loadMetrics])
+  }, [loadChecks, loadMetrics, metricRange])
 
   useEffect(() => {
     const controller = new AbortController()
     const initialLoad = window.setTimeout(() => {
       setNow(Date.now())
-      void Promise.all([loadMetrics(controller.signal), loadChecks(controller.signal)])
+      void loadMetrics(metricRange, controller.signal)
     }, 0)
-    const poller = window.setInterval(() => void refreshAll(), 15_000)
-    const clock = window.setInterval(() => setNow(Date.now()), 1_000)
     return () => {
       controller.abort()
       window.clearTimeout(initialLoad)
-      window.clearInterval(poller)
-      window.clearInterval(clock)
     }
-  }, [loadChecks, loadMetrics, refreshAll])
+  }, [loadMetrics, metricRange])
 
-  const latest = metrics[metrics.length - 1]
+  useEffect(() => {
+    const controller = new AbortController()
+    const initialLoad = window.setTimeout(() => void loadChecks(controller.signal), 0)
+    return () => {
+      controller.abort()
+      window.clearTimeout(initialLoad)
+    }
+  }, [loadChecks])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const poller = window.setInterval(() => {
+      void Promise.all([loadMetrics(metricRange, controller.signal), loadChecks(controller.signal)])
+    }, 15_000)
+    return () => {
+      controller.abort()
+      window.clearInterval(poller)
+    }
+  }, [loadChecks, loadMetrics, metricRange])
+
+  useEffect(() => {
+    const clock = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(clock)
+  }, [])
+
   const latestTime = latest ? new Date(normalizePocketBaseDate(latest.created)).getTime() : 0
   const isFresh = latestTime > 0 && now - latestTime < 45_000
   const activeChecks = checks.filter((check) => check.enabled)
@@ -148,9 +190,18 @@ function Dashboard({ session, onLogout }: DashboardProps) {
   )
   const state = getSystemState({ hasData: Boolean(latest), isFresh, allHealthy, error })
 
-  const cpuData = useMemo(() => metrics.map((metric) => ({ value: metric.cpu_percent, created: metric.created })), [metrics])
-  const memoryData = useMemo(() => metrics.map((metric) => ({ value: metric.memory_percent, created: metric.created })), [metrics])
-  const diskData = useMemo(() => metrics.map((metric) => ({ value: 100 - metric.disk_percent, created: metric.created })), [metrics])
+  const cpuData = useMemo(() => metricPoints.map((metric) => ({ value: metric.cpu_percent, created: metric.created })), [metricPoints])
+  const memoryData = useMemo(() => metricPoints.map((metric) => ({ value: metric.memory_percent, created: metric.created })), [metricPoints])
+  const diskData = useMemo(() => metricPoints.map((metric) => ({ value: 100 - metric.disk_percent, created: metric.created })), [metricPoints])
+  const rangeConfig = METRIC_RANGES[metricRange]
+
+  function changeMetricRange(value: string) {
+    if (!isMetricRange(value) || value === metricRange) return
+    setMetricRange(value)
+    setBucketSeconds(METRIC_RANGES[value].bucketSeconds)
+    setMetricPoints([])
+    setHistoryLoading(true)
+  }
 
   return (
     <main className="dashboard-shell">
@@ -204,6 +255,29 @@ function Dashboard({ session, onLogout }: DashboardProps) {
         </div>
       )}
 
+      <section className="metrics-toolbar" aria-label="Période des statistiques">
+        <div>
+          <p className="eyebrow">HISTORIQUE SYSTÈME</p>
+          <p>Moyennes consolidées · actualisation toutes les 15 secondes</p>
+        </div>
+        <div className="metrics-toolbar__control">
+          <span className={historyLoading ? 'metrics-toolbar__status is-loading' : 'metrics-toolbar__status'}>
+            {historyLoading ? 'CHARGEMENT' : `${metricPoints.length} POINTS`}
+          </span>
+          <label id="metric-range-label">PÉRIODE AFFICHÉE</label>
+          <Select value={metricRange} onValueChange={changeMetricRange}>
+            <SelectTrigger aria-labelledby="metric-range-label">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.entries(METRIC_RANGES) as Array<[MetricRange, (typeof METRIC_RANGES)[MetricRange]]>).map(([value, option]) => (
+                <SelectItem value={value} key={value}>{option.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </section>
+
       <section className="metrics-grid" aria-label="Métriques du serveur">
         <MetricCard
           index="01"
@@ -211,8 +285,10 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           value={latest ? `${latest.cpu_percent.toFixed(1)} %` : '—'}
           detail="Charge instantanée"
           data={cpuData}
+          rangeLabel={rangeConfig.axisLabel}
           accent="mint"
           loading={metricsLoading}
+          chartLoading={historyLoading}
         />
         <MetricCard
           index="02"
@@ -220,8 +296,10 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           value={latest ? `${latest.memory_percent.toFixed(1)} %` : '—'}
           detail={latest ? `${formatBytes(latest.memory_used_bytes)} sur ${formatBytes(latest.memory_total_bytes)}` : 'Utilisation de la RAM'}
           data={memoryData}
+          rangeLabel={rangeConfig.axisLabel}
           accent="blue"
           loading={metricsLoading}
+          chartLoading={historyLoading}
         />
         <MetricCard
           index="03"
@@ -229,8 +307,10 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           value={latest ? formatBytes(latest.disk_free_bytes) : '—'}
           detail={latest ? `${(100 - latest.disk_percent).toFixed(1)} % de ${formatBytes(latest.disk_total_bytes)} disponibles` : 'Espace encore disponible'}
           data={diskData}
+          rangeLabel={rangeConfig.axisLabel}
           accent="orange"
           loading={metricsLoading}
+          chartLoading={historyLoading}
         />
       </section>
 
@@ -241,8 +321,8 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           <div className="observation-icon"><HardDrive size={22} /></div>
           <div>
             <p className="eyebrow">FENÊTRE ACTIVE</p>
-            <p className="observation-number">{metrics.length}</p>
-            <p className="observation-copy">mesures affichées sur les graphiques. L’historique est conservé 7 jours par défaut.</p>
+            <p className="observation-number">{metricPoints.length}</p>
+            <p className="observation-copy">points affichés sur {rangeConfig.label.toLowerCase()}. Chaque point représente une moyenne de {formatBucketDuration(bucketSeconds)}.</p>
           </div>
           <div className="observation-rule" />
           <p className="observation-foot">Session privée · {activeChecks.length} check{activeChecks.length > 1 ? 's' : ''} actif{activeChecks.length > 1 ? 's' : ''}</p>
@@ -274,8 +354,32 @@ interface MetricRecord {
   created: string
 }
 
-interface MetricsResponse { items: MetricRecord[] }
+interface MetricHistoryPoint {
+  created: string
+  cpu_percent: number
+  memory_percent: number
+  disk_percent: number
+}
+
+interface MetricsHistoryResponse {
+  range: MetricRange
+  bucketSeconds: number
+  from: string
+  to: string
+  latest: MetricRecord | null
+  items: MetricHistoryPoint[]
+}
 interface HealthChecksResponse { items: HealthCheck[] }
+
+function isMetricRange(value: string): value is MetricRange {
+  return value === '1h' || value === '24h' || value === '7d'
+}
+
+function formatBucketDuration(seconds: number) {
+  if (seconds < 60) return `${seconds} secondes`
+  const minutes = seconds / 60
+  return `${minutes} minute${minutes > 1 ? 's' : ''}`
+}
 
 function getSystemState({
   hasData,

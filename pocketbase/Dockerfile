@@ -13,6 +13,7 @@ RUN apk add --no-cache ca-certificates tzdata \
     && mkdir -p /pb_data \
     && chown -R pocketbase:pocketbase /pb_data
 COPY --from=downloader /out/pocketbase /usr/local/bin/pocketbase
+COPY pb_hooks /pb_hooks
 COPY start-pocketbase.sh /usr/local/bin/start-pocketbase.sh
 RUN chmod +x /usr/local/bin/start-pocketbase.sh
 USER pocketbase

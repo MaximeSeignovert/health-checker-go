@@ -30,3 +30,16 @@ func TestHasCollectionField(t *testing.T) {
 		t.Fatal("hasCollectionField() should not find an absent field")
 	}
 }
+
+func TestEnsureCollectionIndex(t *testing.T) {
+	existing := []string{"CREATE INDEX idx_existing ON system_metrics (hostname)"}
+	got := ensureCollectionIndex(existing, "idx_system_metrics_created", metricsCreatedIndex)
+	if len(got) != 2 || got[0] != existing[0] || got[1] != metricsCreatedIndex {
+		t.Fatalf("ensureCollectionIndex() = %#v, want existing index followed by created index", got)
+	}
+
+	got = ensureCollectionIndex(got, "idx_system_metrics_created", metricsCreatedIndex)
+	if len(got) != 2 {
+		t.Fatalf("ensureCollectionIndex() duplicated index: %#v", got)
+	}
+}

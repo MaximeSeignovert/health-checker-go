@@ -23,6 +23,7 @@ const (
 	metricsCollectionName = "system_metrics"
 	usersCollectionName   = "dashboard_users"
 	checksCollectionName  = "health_checks"
+	metricsCreatedIndex   = "CREATE INDEX idx_system_metrics_created ON system_metrics (created)"
 )
 
 type config struct {
@@ -81,7 +82,8 @@ type pocketBaseClient struct {
 }
 
 type pocketBaseCollection struct {
-	Fields []map[string]any `json:"fields"`
+	Fields  []map[string]any `json:"fields"`
+	Indexes []string         `json:"indexes"`
 }
 
 func main() {
@@ -395,9 +397,11 @@ func (pb *pocketBaseClient) ensureMetricsCollection(ctx context.Context) error {
 		if !hasCollectionField(collection.Fields, "created") {
 			collection.Fields = append(collection.Fields, createdField())
 		}
+		collection.Indexes = ensureCollectionIndex(collection.Indexes, "idx_system_metrics_created", metricsCreatedIndex)
 		payload := map[string]any{
 			"name":     metricsCollectionName,
 			"fields":   collection.Fields,
+			"indexes":  collection.Indexes,
 			"listRule": "@request.auth.id != \"\"",
 			"viewRule": "@request.auth.id != \"\"",
 		}
@@ -438,6 +442,7 @@ func (pb *pocketBaseClient) ensureMetricsCollection(ctx context.Context) error {
 		"updateRule": nil,
 		"deleteRule": nil,
 		"fields":     fields,
+		"indexes":    []string{metricsCreatedIndex},
 	}
 	status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections", pb.token, payload, nil)
 	if err != nil {
@@ -447,6 +452,15 @@ func (pb *pocketBaseClient) ensureMetricsCollection(ctx context.Context) error {
 		return fmt.Errorf("collection creation returned HTTP %d", status)
 	}
 	return nil
+}
+
+func ensureCollectionIndex(indexes []string, name, statement string) []string {
+	for _, index := range indexes {
+		if strings.Contains(index, name) {
+			return indexes
+		}
+	}
+	return append(indexes, statement)
 }
 
 func (pb *pocketBaseClient) ensureChecksCollection(ctx context.Context) error {
