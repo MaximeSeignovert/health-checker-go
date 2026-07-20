@@ -242,12 +242,28 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .metric-value { margin: -6px 0 0; font-family: "Iowan Old Style", "Palatino Linotype", Palatino, serif; font-size: clamp(28px, 2.5vw, 41px); font-weight: 500; letter-spacing: -.055em; white-space: nowrap; }
 .metric-value.is-loading { color: transparent; background: linear-gradient(90deg, #e5e9e3 25%, #f4f6f1 50%, #e5e9e3 75%); background-size: 200% 100%; border-radius: 5px; animation: shimmer 1.5s infinite; }
 
-.metric-chart { width: 100%; height: 154px; color: var(--metric-accent); }
-.metric-chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.chart-gridline { stroke: #e4e8e2; stroke-width: 1; vector-effect: non-scaling-stroke; }
-.chart-line { stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.chart-point-halo { fill: var(--card); stroke: currentColor; stroke-width: 1; opacity: .65; }
-.chart-point { fill: currentColor; stroke: var(--card); stroke-width: 1.5; }
+.chart-container { display: flex; width: 100%; justify-content: center; font-size: 11px; }
+.chart-container .recharts-surface { outline: none; overflow: visible; }
+.chart-container .recharts-layer:focus, .chart-container .recharts-surface:focus { outline: none; }
+.metric-chart { width: 100%; height: 154px; min-height: 154px; color: var(--metric-accent); }
+.chart-tooltip {
+  min-width: 148px;
+  padding: 10px 11px;
+  color: var(--ink);
+  border: 1px solid rgba(20, 35, 30, .14);
+  border-radius: 10px;
+  background: rgba(251, 252, 248, .97);
+  box-shadow: 0 13px 35px rgba(20, 35, 30, .16);
+  backdrop-filter: blur(10px);
+}
+.chart-tooltip__label { margin: 0 0 8px; color: #7a877f; font-size: 9px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.chart-tooltip__row { display: flex; align-items: center; gap: 7px; }
+.chart-tooltip__indicator { flex: 0 0 auto; display: block; border-color: var(--indicator-color); background: var(--indicator-color); }
+.chart-tooltip__indicator--dot { width: 8px; height: 8px; border-radius: 50%; }
+.chart-tooltip__indicator--line { width: 3px; height: 18px; border-radius: 3px; }
+.chart-tooltip__indicator--dashed { width: 3px; height: 18px; border-width: 1.5px; border-style: dashed; background: transparent; }
+.chart-tooltip__name { color: #66736c; font-size: 10px; }
+.chart-tooltip__value { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
 .metric-card__axis { padding-top: 10px; border-top: 1px solid #e4e8e2; }
 
 .lower-grid {

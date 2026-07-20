@@ -148,9 +148,9 @@ function Dashboard({ session, onLogout }: DashboardProps) {
   )
   const state = getSystemState({ hasData: Boolean(latest), isFresh, allHealthy, error })
 
-  const cpuValues = useMemo(() => metrics.map((metric) => metric.cpu_percent), [metrics])
-  const memoryValues = useMemo(() => metrics.map((metric) => metric.memory_percent), [metrics])
-  const diskValues = useMemo(() => metrics.map((metric) => 100 - metric.disk_percent), [metrics])
+  const cpuData = useMemo(() => metrics.map((metric) => ({ value: metric.cpu_percent, created: metric.created })), [metrics])
+  const memoryData = useMemo(() => metrics.map((metric) => ({ value: metric.memory_percent, created: metric.created })), [metrics])
+  const diskData = useMemo(() => metrics.map((metric) => ({ value: 100 - metric.disk_percent, created: metric.created })), [metrics])
 
   return (
     <main className="dashboard-shell">
@@ -210,7 +210,7 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           title="Processeur"
           value={latest ? `${latest.cpu_percent.toFixed(1)} %` : '—'}
           detail="Charge instantanée"
-          values={cpuValues}
+          data={cpuData}
           accent="mint"
           loading={metricsLoading}
         />
@@ -219,7 +219,7 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           title="Mémoire vive"
           value={latest ? `${latest.memory_percent.toFixed(1)} %` : '—'}
           detail={latest ? `${formatBytes(latest.memory_used_bytes)} sur ${formatBytes(latest.memory_total_bytes)}` : 'Utilisation de la RAM'}
-          values={memoryValues}
+          data={memoryData}
           accent="blue"
           loading={metricsLoading}
         />
@@ -228,7 +228,7 @@ function Dashboard({ session, onLogout }: DashboardProps) {
           title="Disque libre"
           value={latest ? formatBytes(latest.disk_free_bytes) : '—'}
           detail={latest ? `${(100 - latest.disk_percent).toFixed(1)} % de ${formatBytes(latest.disk_total_bytes)} disponibles` : 'Espace encore disponible'}
-          values={diskValues}
+          data={diskData}
           accent="orange"
           loading={metricsLoading}
         />

@@ -1,16 +1,16 @@
-import { MetricChart } from './metric-chart'
+import { MetricChart, type MetricPoint } from './metric-chart'
 
 interface MetricCardProps {
   index: string
   title: string
   value: string
   detail: string
-  values: number[]
+  data: MetricPoint[]
   accent: 'mint' | 'blue' | 'orange'
   loading: boolean
 }
 
-export function MetricCard({ index, title, value, detail, values, accent, loading }: MetricCardProps) {
+export function MetricCard({ index, title, value, detail, data, accent, loading }: MetricCardProps) {
   return (
     <article className={`metric-card metric-card--${accent}`}>
       <div className="metric-card__topline">
@@ -24,7 +24,7 @@ export function MetricCard({ index, title, value, detail, values, accent, loadin
         </div>
         <p className={loading ? 'metric-value is-loading' : 'metric-value'}>{value}</p>
       </div>
-      <MetricChart values={values} label={`Historique : ${title}`} accent={accent} />
+      <MetricChart data={data} label={`Historique : ${title}`} valueLabel={title} accent={accent} />
       <div className="metric-card__axis" aria-hidden="true"><span>−30 MIN</span><span>MAINTENANT</span></div>
     </article>
   )
