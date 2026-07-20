@@ -1,0 +1,80 @@
+name: vps-watch
+
+services:
+  pocketbase:
+    build:
+      context: ./pocketbase
+      args:
+        POCKETBASE_VERSION: ${POCKETBASE_VERSION:-0.38.2}
+    restart: unless-stopped
+    environment:
+      PB_SUPERUSER_EMAIL: ${PB_SUPERUSER_EMAIL:?PB_SUPERUSER_EMAIL must be set}
+      PB_SUPERUSER_PASSWORD: ${PB_SUPERUSER_PASSWORD:?PB_SUPERUSER_PASSWORD must be set}
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - pocketbase_data:/pb_data
+    ports:
+      - "127.0.0.1:${POCKETBASE_PORT:-8090}:8090"
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - monitoring
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      pocketbase:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    networks:
+      - monitoring
+
+  collector:
+    build:
+      context: ./collector
+    restart: unless-stopped
+    depends_on:
+      pocketbase:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    environment:
+      POCKETBASE_URL: http://pocketbase:8090
+      PB_SUPERUSER_EMAIL: ${PB_SUPERUSER_EMAIL:?PB_SUPERUSER_EMAIL must be set}
+      PB_SUPERUSER_PASSWORD: ${PB_SUPERUSER_PASSWORD:?PB_SUPERUSER_PASSWORD must be set}
+      FRONTEND_HEALTH_URL: http://frontend/health
+      POCKETBASE_HEALTH_URL: http://pocketbase:8090/api/health
+      PROC_PATH: /host/proc
+      DISK_PATH: /host
+      COLLECT_INTERVAL: ${COLLECT_INTERVAL:-15s}
+      HEALTH_TIMEOUT: ${HEALTH_TIMEOUT:-3s}
+      METRICS_RETENTION: ${METRICS_RETENTION:-168h}
+      VPS_NAME: ${VPS_NAME:-vps-01}
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - type: bind
+        source: /proc
+        target: /host/proc
+        read_only: true
+      - type: bind
+        source: ${HOST_ROOT_PATH:-/}
+        target: /host
+        read_only: true
+    networks:
+      - monitoring
+
+volumes:
+  pocketbase_data:
+
+networks:
+  monitoring:
+    driver: bridge
