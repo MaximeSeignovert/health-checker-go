@@ -23,9 +23,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
-    networks:
-      - monitoring
-
   frontend:
     build:
       context: ./frontend
@@ -35,9 +32,6 @@ services:
         condition: service_healthy
     ports:
       - "${FRONTEND_PORT:-3000}:80"
-    networks:
-      - monitoring
-
   collector:
     build:
       context: ./collector
@@ -69,12 +63,5 @@ services:
         source: ${HOST_ROOT_PATH:-/}
         target: /host
         read_only: true
-    networks:
-      - monitoring
-
 volumes:
   pocketbase_data:
-
-networks:
-  monitoring:
-    driver: bridge
