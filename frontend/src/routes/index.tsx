@@ -1,28 +1,78 @@
 import { createFileRoute } from '@tanstack/react-router'
 import {
   Activity,
-  Database,
   HardDrive,
+  LogOut,
   RefreshCw,
-  Server,
+  ShieldCheck,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { LoginScreen } from '@/components/auth/login-screen'
+import { HealthChecksPanel, type HealthCheck } from '@/components/dashboard/health-checks-panel'
 import { MetricCard } from '@/components/dashboard/metric-card'
-import { ServiceStatus } from '@/components/dashboard/service-status'
+import {
+  ApiError,
+  apiFetch,
+  clearSession,
+  restoreSession,
+  type DashboardSession,
+} from '@/lib/api'
 
 export const Route = createFileRoute('/')({
   component: Index,
 })
 
 function Index() {
+  const [session, setSession] = useState<DashboardSession | null | undefined>(undefined)
+
+  useEffect(() => {
+    let active = true
+    void restoreSession().then((restored) => {
+      if (active) setSession(restored)
+    })
+    return () => { active = false }
+  }, [])
+
+  function logout() {
+    clearSession()
+    setSession(null)
+  }
+
+  if (session === undefined) {
+    return (
+      <main className="session-loader" aria-label="Vérification de la session">
+        <span className="brand-mark"><Activity size={18} /></span>
+        <p>Vérification de l’accès sécurisé…</p>
+      </main>
+    )
+  }
+  if (!session) return <LoginScreen onLogin={setSession} />
+  return <Dashboard session={session} onLogout={logout} />
+}
+
+interface DashboardProps {
+  session: DashboardSession
+  onLogout: () => void
+}
+
+function Dashboard({ session, onLogout }: DashboardProps) {
   const [metrics, setMetrics] = useState<MetricRecord[]>([])
-  const [loading, setLoading] = useState(true)
+  const [checks, setChecks] = useState<HealthCheck[]>([])
+  const [metricsLoading, setMetricsLoading] = useState(true)
+  const [checksLoading, setChecksLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(0)
 
-  const loadMetrics = useCallback(async (signal?: AbortSignal, manual = false) => {
-    if (manual) setRefreshing(true)
+  const handleRequestError = useCallback((caught: unknown, fallback: string) => {
+    if (caught instanceof ApiError && caught.status === 401) {
+      onLogout()
+      return 'Votre session a expiré.'
+    }
+    return caught instanceof Error ? caught.message : fallback
+  }, [onLogout])
+
+  const loadMetrics = useCallback(async (signal?: AbortSignal) => {
     try {
       const params = new URLSearchParams({
         page: '1',
@@ -31,32 +81,51 @@ function Index() {
         fields:
           'id,cpu_percent,memory_percent,memory_used_bytes,memory_total_bytes,disk_percent,disk_free_bytes,disk_total_bytes,frontend_healthy,frontend_latency_ms,pocketbase_healthy,pocketbase_latency_ms,hostname,created',
       })
-      const response = await fetch(
-        `/api/collections/system_metrics/records?${params.toString()}`,
-        { signal, headers: { Accept: 'application/json' } },
-      )
-      if (!response.ok) {
-        throw new Error(`PocketBase a répondu ${response.status}`)
-      }
+      const response = await apiFetch(`/api/collections/system_metrics/records?${params.toString()}`, { signal })
       const payload = (await response.json()) as MetricsResponse
       setMetrics(payload.items.reverse())
       setError(null)
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return
-      setError(caught instanceof Error ? caught.message : 'Connexion impossible')
+      setError(handleRequestError(caught, 'Connexion aux métriques impossible.'))
     } finally {
-      setLoading(false)
-      setRefreshing(false)
+      setMetricsLoading(false)
     }
-  }, [])
+  }, [handleRequestError])
+
+  const loadChecks = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const params = new URLSearchParams({
+        page: '1',
+        perPage: '200',
+        sort: 'created',
+        fields: 'id,name,url,enabled,healthy,latency_ms,last_error,last_checked,created,updated',
+      })
+      const response = await apiFetch(`/api/collections/health_checks/records?${params.toString()}`, { signal })
+      const payload = (await response.json()) as HealthChecksResponse
+      setChecks(payload.items)
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') return
+      setError(handleRequestError(caught, 'Connexion aux health checks impossible.'))
+    } finally {
+      setChecksLoading(false)
+    }
+  }, [handleRequestError])
+
+  const refreshAll = useCallback(async (manual = false) => {
+    if (manual) setRefreshing(true)
+    await Promise.all([loadMetrics(), loadChecks()])
+    setNow(Date.now())
+    setRefreshing(false)
+  }, [loadChecks, loadMetrics])
 
   useEffect(() => {
     const controller = new AbortController()
     const initialLoad = window.setTimeout(() => {
       setNow(Date.now())
-      void loadMetrics(controller.signal)
+      void Promise.all([loadMetrics(controller.signal), loadChecks(controller.signal)])
     }, 0)
-    const poller = window.setInterval(() => void loadMetrics(), 15_000)
+    const poller = window.setInterval(() => void refreshAll(), 15_000)
     const clock = window.setInterval(() => setNow(Date.now()), 1_000)
     return () => {
       controller.abort()
@@ -64,25 +133,24 @@ function Index() {
       window.clearInterval(poller)
       window.clearInterval(clock)
     }
-  }, [loadMetrics])
+  }, [loadChecks, loadMetrics, refreshAll])
 
   const latest = metrics[metrics.length - 1]
   const latestTime = latest ? new Date(normalizePocketBaseDate(latest.created)).getTime() : 0
   const isFresh = latestTime > 0 && now - latestTime < 45_000
+  const activeChecks = checks.filter((check) => check.enabled)
+  const customChecksHealthy = activeChecks.every((check) => Boolean(check.last_checked) && check.healthy)
   const allHealthy = Boolean(
-    latest && latest.frontend_healthy && latest.pocketbase_healthy,
+    latest
+    && latest.frontend_healthy
+    && latest.pocketbase_healthy
+    && (checksLoading || customChecksHealthy),
   )
   const state = getSystemState({ hasData: Boolean(latest), isFresh, allHealthy, error })
 
   const cpuValues = useMemo(() => metrics.map((metric) => metric.cpu_percent), [metrics])
-  const memoryValues = useMemo(
-    () => metrics.map((metric) => metric.memory_percent),
-    [metrics],
-  )
-  const diskValues = useMemo(
-    () => metrics.map((metric) => 100 - metric.disk_percent),
-    [metrics],
-  )
+  const memoryValues = useMemo(() => metrics.map((metric) => metric.memory_percent), [metrics])
+  const diskValues = useMemo(() => metrics.map((metric) => 100 - metric.disk_percent), [metrics])
 
   return (
     <main className="dashboard-shell">
@@ -92,9 +160,16 @@ function Index() {
           <span className="brand-mark"><Activity size={18} strokeWidth={2.2} /></span>
           <span>VPS<span className="brand-slash">/</span>WATCH</span>
         </a>
-        <div className={`system-pill system-pill--${state.tone}`}>
-          <span className="status-dot" aria-hidden="true" />
-          <span>{state.shortLabel}</span>
+        <div className="topbar-actions">
+          <div className={`system-pill system-pill--${state.tone}`}>
+            <span className="status-dot" aria-hidden="true" />
+            <span>{state.shortLabel}</span>
+          </div>
+          <div className="account-chip" title={session.email}>
+            <ShieldCheck size={15} />
+            <span>{session.email}</span>
+            <button type="button" onClick={onLogout} aria-label="Se déconnecter"><LogOut size={14} /></button>
+          </div>
         </div>
       </header>
 
@@ -111,9 +186,9 @@ function Index() {
             <button
               className="refresh-button"
               type="button"
-              onClick={() => void loadMetrics(undefined, true)}
+              onClick={() => void refreshAll(true)}
               disabled={refreshing}
-              aria-label="Actualiser les métriques"
+              aria-label="Actualiser les métriques et les services"
             >
               <RefreshCw size={15} className={refreshing ? 'is-spinning' : ''} />
               Actualiser
@@ -137,7 +212,7 @@ function Index() {
           detail="Charge instantanée"
           values={cpuValues}
           accent="mint"
-          loading={loading}
+          loading={metricsLoading}
         />
         <MetricCard
           index="02"
@@ -146,7 +221,7 @@ function Index() {
           detail={latest ? `${formatBytes(latest.memory_used_bytes)} sur ${formatBytes(latest.memory_total_bytes)}` : 'Utilisation de la RAM'}
           values={memoryValues}
           accent="blue"
-          loading={loading}
+          loading={metricsLoading}
         />
         <MetricCard
           index="03"
@@ -155,38 +230,14 @@ function Index() {
           detail={latest ? `${(100 - latest.disk_percent).toFixed(1)} % de ${formatBytes(latest.disk_total_bytes)} disponibles` : 'Espace encore disponible'}
           values={diskValues}
           accent="orange"
-          loading={loading}
+          loading={metricsLoading}
         />
       </section>
 
       <section className="lower-grid">
-        <div className="services-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">HEALTH CHECKS</p>
-              <h2>Services essentiels</h2>
-            </div>
-            <p>Contrôle HTTP toutes les 15 secondes</p>
-          </div>
-          <div className="services-list">
-            <ServiceStatus
-              icon={<Server size={20} />}
-              name="Frontend"
-              description="Interface et proxy Nginx"
-              healthy={latest?.frontend_healthy}
-              latency={latest?.frontend_latency_ms}
-            />
-            <ServiceStatus
-              icon={<Database size={20} />}
-              name="PocketBase"
-              description="API et stockage SQLite"
-              healthy={latest?.pocketbase_healthy}
-              latency={latest?.pocketbase_latency_ms}
-            />
-          </div>
-        </div>
+        <HealthChecksPanel checks={checks} loading={checksLoading} onChanged={loadChecks} />
 
-        <aside className="observation-card" aria-label="Fenêtre d'observation">
+        <aside className="observation-card" aria-label="Fenêtre d’observation">
           <div className="observation-icon"><HardDrive size={22} /></div>
           <div>
             <p className="eyebrow">FENÊTRE ACTIVE</p>
@@ -194,7 +245,7 @@ function Index() {
             <p className="observation-copy">mesures affichées sur les graphiques. L’historique est conservé 7 jours par défaut.</p>
           </div>
           <div className="observation-rule" />
-          <p className="observation-foot">Collecte légère · aucun agent tiers</p>
+          <p className="observation-foot">Session privée · {activeChecks.length} check{activeChecks.length > 1 ? 's' : ''} actif{activeChecks.length > 1 ? 's' : ''}</p>
         </aside>
       </section>
 
@@ -223,9 +274,8 @@ interface MetricRecord {
   created: string
 }
 
-interface MetricsResponse {
-  items: MetricRecord[]
-}
+interface MetricsResponse { items: MetricRecord[] }
+interface HealthChecksResponse { items: HealthCheck[] }
 
 function getSystemState({
   hasData,
