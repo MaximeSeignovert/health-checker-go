@@ -19,12 +19,18 @@ import (
 	"time"
 )
 
-const collectionName = "system_metrics"
+const (
+	metricsCollectionName = "system_metrics"
+	usersCollectionName   = "dashboard_users"
+	checksCollectionName  = "health_checks"
+)
 
 type config struct {
 	pocketBaseURL       string
 	superuserEmail      string
 	superuserPassword   string
+	dashboardEmail      string
+	dashboardPassword   string
 	frontendHealthURL   string
 	pocketBaseHealthURL string
 	procPath            string
@@ -53,6 +59,17 @@ type metricRecord struct {
 	PocketBaseHealthy   bool    `json:"pocketbase_healthy"`
 	PocketBaseLatencyMS float64 `json:"pocketbase_latency_ms"`
 	Hostname            string  `json:"hostname"`
+}
+
+type healthCheckRecord struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	URL         string  `json:"url"`
+	Enabled     bool    `json:"enabled"`
+	Healthy     bool    `json:"healthy"`
+	LatencyMS   float64 `json:"latency_ms"`
+	LastError   string  `json:"last_error"`
+	LastChecked string  `json:"last_checked"`
 }
 
 type pocketBaseClient struct {
@@ -91,7 +108,7 @@ func main() {
 		http:     &http.Client{Timeout: 10 * time.Second},
 	}
 
-	if err := waitForPocketBase(ctx, pb, logger); err != nil {
+	if err := waitForPocketBase(ctx, cfg, pb, logger); err != nil {
 		logger.Info("collector stopped before PocketBase became ready")
 		return
 	}
@@ -125,6 +142,8 @@ func loadConfig() (config, error) {
 		pocketBaseURL:       envOr("POCKETBASE_URL", "http://pocketbase:8090"),
 		superuserEmail:      os.Getenv("PB_SUPERUSER_EMAIL"),
 		superuserPassword:   os.Getenv("PB_SUPERUSER_PASSWORD"),
+		dashboardEmail:      os.Getenv("DASHBOARD_ADMIN_EMAIL"),
+		dashboardPassword:   os.Getenv("DASHBOARD_ADMIN_PASSWORD"),
 		frontendHealthURL:   envOr("FRONTEND_HEALTH_URL", "http://frontend/health"),
 		pocketBaseHealthURL: envOr("POCKETBASE_HEALTH_URL", "http://pocketbase:8090/api/health"),
 		procPath:            envOr("PROC_PATH", "/proc"),
@@ -136,6 +155,12 @@ func loadConfig() (config, error) {
 	}
 	if cfg.superuserEmail == "" || cfg.superuserPassword == "" {
 		return config{}, errors.New("PB_SUPERUSER_EMAIL and PB_SUPERUSER_PASSWORD are required")
+	}
+	if cfg.dashboardEmail == "" || cfg.dashboardPassword == "" {
+		return config{}, errors.New("DASHBOARD_ADMIN_EMAIL and DASHBOARD_ADMIN_PASSWORD are required")
+	}
+	if len(cfg.dashboardPassword) < 10 {
+		return config{}, errors.New("DASHBOARD_ADMIN_PASSWORD must contain at least 10 characters")
 	}
 	if cfg.interval < time.Second {
 		return config{}, errors.New("COLLECT_INTERVAL must be at least 1s")
@@ -162,10 +187,10 @@ func durationOr(key string, fallback time.Duration) time.Duration {
 	return parsed
 }
 
-func waitForPocketBase(ctx context.Context, pb *pocketBaseClient, logger *slog.Logger) error {
+func waitForPocketBase(ctx context.Context, cfg config, pb *pocketBaseClient, logger *slog.Logger) error {
 	for {
 		if err := pb.authenticate(ctx); err == nil {
-			if err = pb.ensureCollection(ctx); err == nil {
+			if err = pb.ensureSchema(ctx, cfg); err == nil {
 				return nil
 			}
 			logger.Warn("PocketBase schema is not ready", "error", err)
@@ -220,6 +245,9 @@ func collectAndStore(ctx context.Context, cfg config, system *systemCollector, p
 		logger.Error("metric storage failed", "error", err)
 		return
 	}
+	if err := pb.collectHealthChecks(ctx, cfg.healthTimeout); err != nil {
+		logger.Warn("custom health checks failed", "error", err)
+	}
 	logger.Debug("metric stored", "cpu", record.CPUPercent, "memory", record.MemoryPercent, "disk", record.DiskPercent, "frontend", record.FrontendHealthy, "pocketbase", record.PocketBaseHealthy)
 }
 
@@ -241,6 +269,23 @@ func checkService(parent context.Context, endpoint string, timeout time.Duration
 	return serviceStatus{Healthy: resp.StatusCode >= 200 && resp.StatusCode < 400, LatencyMS: latency}
 }
 
+func validateHealthURL(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("only HTTP and HTTPS endpoints are supported")
+	}
+	if parsed.Hostname() == "" {
+		return errors.New("endpoint hostname is required")
+	}
+	if parsed.User != nil {
+		return errors.New("credentials in endpoint URLs are not supported")
+	}
+	return nil
+}
+
 func (pb *pocketBaseClient) authenticate(ctx context.Context) error {
 	payload := map[string]string{"identity": pb.email, "password": pb.password}
 	var response struct {
@@ -257,22 +302,107 @@ func (pb *pocketBaseClient) authenticate(ctx context.Context) error {
 	return nil
 }
 
-func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
+func (pb *pocketBaseClient) ensureSchema(ctx context.Context, cfg config) error {
+	if err := pb.ensureUsersCollection(ctx); err != nil {
+		return fmt.Errorf("dashboard users schema: %w", err)
+	}
+	if err := pb.ensureDashboardUser(ctx, cfg.dashboardEmail, cfg.dashboardPassword); err != nil {
+		return fmt.Errorf("dashboard account: %w", err)
+	}
+	if err := pb.ensureMetricsCollection(ctx); err != nil {
+		return fmt.Errorf("metrics schema: %w", err)
+	}
+	if err := pb.ensureChecksCollection(ctx); err != nil {
+		return fmt.Errorf("health checks schema: %w", err)
+	}
+	return pb.ensureDefaultChecks(ctx, cfg)
+}
+
+func (pb *pocketBaseClient) ensureUsersCollection(ctx context.Context) error {
+	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+usersCollectionName, pb.token, nil, nil)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"name":         usersCollectionName,
+		"type":         "auth",
+		"listRule":     nil,
+		"viewRule":     "id = @request.auth.id",
+		"createRule":   nil,
+		"updateRule":   "id = @request.auth.id",
+		"deleteRule":   nil,
+		"manageRule":   nil,
+		"authRule":     "",
+		"passwordAuth": map[string]any{"enabled": true, "identityFields": []string{"email"}},
+	}
+	if status == http.StatusNotFound {
+		payload["fields"] = []map[string]any{}
+		status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections", pb.token, payload, nil)
+	} else if status == http.StatusOK {
+		status, err = pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+usersCollectionName, pb.token, payload, nil)
+	}
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("collection upsert returned HTTP %d", status)
+	}
+	return nil
+}
+
+func (pb *pocketBaseClient) ensureDashboardUser(ctx context.Context, email, password string) error {
+	filter := url.QueryEscape(fmt.Sprintf(`email = "%s"`, strings.ReplaceAll(email, `"`, `\"`)))
+	path := "/api/collections/" + usersCollectionName + "/records?perPage=1&fields=id&filter=" + filter
+	var response struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	status, err := pb.doJSON(ctx, http.MethodGet, path, pb.token, nil, &response)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("account lookup returned HTTP %d", status)
+	}
+	payload := map[string]any{
+		"email":           email,
+		"emailVisibility": false,
+		"verified":        true,
+		"password":        password,
+		"passwordConfirm": password,
+	}
+	if len(response.Items) == 0 {
+		status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections/"+usersCollectionName+"/records", pb.token, payload, nil)
+	} else {
+		status, err = pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+usersCollectionName+"/records/"+response.Items[0].ID, pb.token, payload, nil)
+	}
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("account upsert returned HTTP %d", status)
+	}
+	return nil
+}
+
+func (pb *pocketBaseClient) ensureMetricsCollection(ctx context.Context) error {
 	var collection pocketBaseCollection
-	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+collectionName, pb.token, nil, &collection)
+	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+metricsCollectionName, pb.token, nil, &collection)
 	if err != nil {
 		return err
 	}
 	if status == http.StatusOK {
-		if hasCollectionField(collection.Fields, "created") {
-			return nil
+		if !hasCollectionField(collection.Fields, "created") {
+			collection.Fields = append(collection.Fields, createdField())
 		}
-		collection.Fields = append(collection.Fields, createdField())
 		payload := map[string]any{
-			"name":   collectionName,
-			"fields": collection.Fields,
+			"name":     metricsCollectionName,
+			"fields":   collection.Fields,
+			"listRule": "@request.auth.id != \"\"",
+			"viewRule": "@request.auth.id != \"\"",
 		}
-		status, err = pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+collectionName, pb.token, payload, nil)
+		status, err = pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+metricsCollectionName, pb.token, payload, nil)
 		if err != nil {
 			return err
 		}
@@ -301,10 +431,10 @@ func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
 		createdField(),
 	}
 	payload := map[string]any{
-		"name":       collectionName,
+		"name":       metricsCollectionName,
 		"type":       "base",
-		"listRule":   "",
-		"viewRule":   "",
+		"listRule":   "@request.auth.id != \"\"",
+		"viewRule":   "@request.auth.id != \"\"",
 		"createRule": nil,
 		"updateRule": nil,
 		"deleteRule": nil,
@@ -316,6 +446,70 @@ func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("collection creation returned HTTP %d", status)
+	}
+	return nil
+}
+
+func (pb *pocketBaseClient) ensureChecksCollection(ctx context.Context) error {
+	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+checksCollectionName, pb.token, nil, nil)
+	if err != nil {
+		return err
+	}
+	updateRule := `@request.auth.id != "" && @request.body.healthy:isset = false && @request.body.latency_ms:isset = false && @request.body.last_error:isset = false && @request.body.last_checked:isset = false`
+	basePayload := map[string]any{
+		"name":       checksCollectionName,
+		"listRule":   "@request.auth.id != \"\"",
+		"viewRule":   "@request.auth.id != \"\"",
+		"createRule": updateRule,
+		"updateRule": updateRule,
+		"deleteRule": "@request.auth.id != \"\"",
+	}
+	if status == http.StatusOK {
+		status, err = pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+checksCollectionName, pb.token, basePayload, nil)
+	} else if status == http.StatusNotFound {
+		basePayload["type"] = "base"
+		basePayload["fields"] = []map[string]any{
+			{"name": "name", "type": "text", "required": true, "min": 1, "max": 100},
+			{"name": "url", "type": "url", "required": true},
+			{"name": "enabled", "type": "bool"},
+			{"name": "healthy", "type": "bool"},
+			{"name": "latency_ms", "type": "number", "min": 0},
+			{"name": "last_error", "type": "text", "max": 500},
+			{"name": "last_checked", "type": "date"},
+			createdField(),
+			{"name": "updated", "type": "autodate", "onCreate": true, "onUpdate": true},
+		}
+		status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections", pb.token, basePayload, nil)
+	}
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("collection upsert returned HTTP %d", status)
+	}
+	return nil
+}
+
+func (pb *pocketBaseClient) ensureDefaultChecks(ctx context.Context, cfg config) error {
+	checks, err := pb.listHealthChecks(ctx, false)
+	if err != nil {
+		return err
+	}
+	if len(checks) > 0 {
+		return nil
+	}
+	defaults := []map[string]any{
+		{"name": "Frontend", "url": cfg.frontendHealthURL, "enabled": true},
+		{"name": "PocketBase", "url": cfg.pocketBaseHealthURL, "enabled": true},
+	}
+	for _, item := range defaults {
+		status, err := pb.doJSON(ctx, http.MethodPost, "/api/collections/"+checksCollectionName+"/records", pb.token, item, nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("default check creation returned HTTP %d", status)
+		}
 	}
 	return nil
 }
@@ -338,8 +532,82 @@ func hasCollectionField(fields []map[string]any, name string) bool {
 	return false
 }
 
+func (pb *pocketBaseClient) listHealthChecks(ctx context.Context, enabledOnly bool) ([]healthCheckRecord, error) {
+	params := url.Values{}
+	params.Set("page", "1")
+	params.Set("perPage", "500")
+	params.Set("sort", "created")
+	params.Set("fields", "id,name,url,enabled,healthy,latency_ms,last_error,last_checked")
+	if enabledOnly {
+		params.Set("filter", "enabled = true")
+	}
+	var response struct {
+		Items []healthCheckRecord `json:"items"`
+	}
+	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+checksCollectionName+"/records?"+params.Encode(), pb.token, nil, &response)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("health check lookup returned HTTP %d", status)
+	}
+	return response.Items, nil
+}
+
+func (pb *pocketBaseClient) collectHealthChecks(ctx context.Context, timeout time.Duration) error {
+	checks, err := pb.listHealthChecks(ctx, true)
+	if err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []error
+	workers := make(chan struct{}, 8)
+	for _, check := range checks {
+		check := check
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case workers <- struct{}{}:
+				defer func() { <-workers }()
+			case <-ctx.Done():
+				return
+			}
+
+			status := serviceStatus{}
+			lastError := ""
+			if err := validateHealthURL(check.URL); err != nil {
+				lastError = err.Error()
+			} else {
+				status = checkService(ctx, check.URL, timeout)
+				if !status.Healthy {
+					lastError = "Le service n'a pas répondu avec un statut HTTP valide"
+				}
+			}
+			payload := map[string]any{
+				"healthy":      status.Healthy,
+				"latency_ms":   round(status.LatencyMS, 1),
+				"last_error":   lastError,
+				"last_checked": time.Now().UTC().Format("2006-01-02 15:04:05.000Z"),
+			}
+			responseStatus, updateErr := pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+checksCollectionName+"/records/"+check.ID, pb.token, payload, nil)
+			if updateErr == nil && responseStatus != http.StatusOK {
+				updateErr = fmt.Errorf("status update returned HTTP %d", responseStatus)
+			}
+			if updateErr != nil {
+				mu.Lock()
+				failures = append(failures, fmt.Errorf("%s: %w", check.Name, updateErr))
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return errors.Join(failures...)
+}
+
 func (pb *pocketBaseClient) createRecord(ctx context.Context, record metricRecord) error {
-	status, err := pb.doJSON(ctx, http.MethodPost, "/api/collections/"+collectionName+"/records", pb.token, record, nil)
+	status, err := pb.doJSON(ctx, http.MethodPost, "/api/collections/"+metricsCollectionName+"/records", pb.token, record, nil)
 	if err != nil {
 		return err
 	}
@@ -347,7 +615,7 @@ func (pb *pocketBaseClient) createRecord(ctx context.Context, record metricRecor
 		if err := pb.authenticate(ctx); err != nil {
 			return err
 		}
-		status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections/"+collectionName+"/records", pb.token, record, nil)
+		status, err = pb.doJSON(ctx, http.MethodPost, "/api/collections/"+metricsCollectionName+"/records", pb.token, record, nil)
 		if err != nil {
 			return err
 		}
@@ -360,7 +628,7 @@ func (pb *pocketBaseClient) createRecord(ctx context.Context, record metricRecor
 
 func (pb *pocketBaseClient) cleanup(ctx context.Context, cutoff time.Time) error {
 	filter := fmt.Sprintf(`created < "%s"`, cutoff.UTC().Format("2006-01-02 15:04:05.000Z"))
-	path := "/api/collections/" + collectionName + "/records?perPage=500&fields=id&sort=created&filter=" + url.QueryEscape(filter)
+	path := "/api/collections/" + metricsCollectionName + "/records?perPage=500&fields=id&sort=created&filter=" + url.QueryEscape(filter)
 	var response struct {
 		Items []struct {
 			ID string `json:"id"`
@@ -374,7 +642,7 @@ func (pb *pocketBaseClient) cleanup(ctx context.Context, cutoff time.Time) error
 		return fmt.Errorf("cleanup lookup returned HTTP %d", status)
 	}
 	for _, item := range response.Items {
-		status, err = pb.doJSON(ctx, http.MethodDelete, "/api/collections/"+collectionName+"/records/"+item.ID, pb.token, nil, nil)
+		status, err = pb.doJSON(ctx, http.MethodDelete, "/api/collections/"+metricsCollectionName+"/records/"+item.ID, pb.token, nil, nil)
 		if err != nil {
 			return err
 		}
