@@ -17,3 +17,16 @@ func TestPercent(t *testing.T) {
 		t.Fatalf("percent() with zero total = %v, want 0", got)
 	}
 }
+
+func TestHasCollectionField(t *testing.T) {
+	fields := []map[string]any{
+		{"name": "id", "type": "text"},
+		createdField(),
+	}
+	if !hasCollectionField(fields, "created") {
+		t.Fatal("hasCollectionField() should find the created field")
+	}
+	if hasCollectionField(fields, "updated") {
+		t.Fatal("hasCollectionField() should not find an absent field")
+	}
+}

@@ -63,6 +63,10 @@ type pocketBaseClient struct {
 	token    string
 }
 
+type pocketBaseCollection struct {
+	Fields []map[string]any `json:"fields"`
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg, err := loadConfig()
@@ -254,11 +258,27 @@ func (pb *pocketBaseClient) authenticate(ctx context.Context) error {
 }
 
 func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
-	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+collectionName, pb.token, nil, nil)
+	var collection pocketBaseCollection
+	status, err := pb.doJSON(ctx, http.MethodGet, "/api/collections/"+collectionName, pb.token, nil, &collection)
 	if err != nil {
 		return err
 	}
 	if status == http.StatusOK {
+		if hasCollectionField(collection.Fields, "created") {
+			return nil
+		}
+		collection.Fields = append(collection.Fields, createdField())
+		payload := map[string]any{
+			"name":   collectionName,
+			"fields": collection.Fields,
+		}
+		status, err = pb.doJSON(ctx, http.MethodPatch, "/api/collections/"+collectionName, pb.token, payload, nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("collection migration returned HTTP %d", status)
+		}
 		return nil
 	}
 	if status != http.StatusNotFound {
@@ -278,6 +298,7 @@ func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
 		{"name": "pocketbase_healthy", "type": "bool"},
 		{"name": "pocketbase_latency_ms", "type": "number", "min": 0},
 		{"name": "hostname", "type": "text", "max": 255},
+		createdField(),
 	}
 	payload := map[string]any{
 		"name":       collectionName,
@@ -297,6 +318,24 @@ func (pb *pocketBaseClient) ensureCollection(ctx context.Context) error {
 		return fmt.Errorf("collection creation returned HTTP %d", status)
 	}
 	return nil
+}
+
+func createdField() map[string]any {
+	return map[string]any{
+		"name":     "created",
+		"type":     "autodate",
+		"onCreate": true,
+		"onUpdate": false,
+	}
+}
+
+func hasCollectionField(fields []map[string]any, name string) bool {
+	for _, field := range fields {
+		if fieldName, ok := field["name"].(string); ok && fieldName == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (pb *pocketBaseClient) createRecord(ctx context.Context, record metricRecord) error {
